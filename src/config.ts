@@ -31,3 +31,29 @@ export function parseFolderId(input: string): string {
   const m = s.match(/\/folders\/([\w-]+)/) ?? s.match(/[?&]id=([\w-]+)/);
   return m ? m[1] : s;
 }
+
+/**
+ * Drive の共有リンク・プレビューURL・ファイルIDからファイルIDを取り出す。
+ * 例: https://drive.google.com/file/d/<ID>/view, https://drive.google.com/open?id=<ID>
+ * フォルダのURLや、IDらしくない文字列は null。
+ */
+export function parseFileId(input: string): string | null {
+  const s = input.trim();
+  if (!s || /\/folders\//.test(s)) return null;
+  const m = s.match(/\/file\/d\/([\w-]+)/) ?? s.match(/[?&]id=([\w-]+)/);
+  if (m) return m[1];
+  return /^[\w-]{20,}$/.test(s) ? s : null;
+}
+
+/** アプリのURLの ?fileId=... から開く本のIDを取り出す */
+export function fileIdFromLocation(search: string): string | null {
+  const id = new URLSearchParams(search).get('fileId');
+  return id && /^[\w-]+$/.test(id) ? id : null;
+}
+
+/** Drive の画面で押すと、開いているPDFをこのアプリで開くブックマークレット */
+export function bookmarklet(appUrl: string): string {
+  const code = `(()=>{const l=location.href,m=l.match(/\\/file\\/d\\/([\\w-]+)/)||l.match(/[?&]id=([\\w-]+)/);` +
+    `m?window.open(${JSON.stringify(appUrl)}+'?fileId='+m[1],'_blank'):alert('Google Drive でPDFを開いた状態で押してください')})()`;
+  return `javascript:${encodeURIComponent(code)}`;
+}

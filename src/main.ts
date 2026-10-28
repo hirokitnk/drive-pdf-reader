@@ -1,5 +1,5 @@
 import './style.css';
-import { loadConfig, parseFolderId, saveConfig, type Config } from './config';
+import { fileIdFromLocation, loadConfig, parseFolderId, saveConfig, type Config } from './config';
 import { getToken, hasSignedInBefore, signOut } from './drive/auth';
 import { DriveClient, type DriveItem } from './drive/api';
 import { Shelf } from './shelf/shelf';
@@ -14,6 +14,14 @@ let config: Config = loadConfig();
 let drive: DriveClient | null = null;
 let viewer: Viewer | null = null;
 let shelf: Shelf | null = null;
+/** リンク（?fileId=）で来たとき、ログイン後に開く本 */
+let pendingFileId: string | null = fileIdFromLocation(location.search);
+
+function clearFileIdParam(): void {
+  const u = new URL(location.href);
+  u.searchParams.delete('fileId');
+  history.replaceState(null, '', u);
+}
 
 function showScreen(el: HTMLElement): void {
   app.replaceChildren(el);
@@ -32,7 +40,7 @@ function loginScreen(error = ''): void {
     <button class="primary" data-act="login">Google でログイン</button>
     <label class="s-btn alt">ログインせずにPDFを開く<input class="in-file" type="file" accept="application/pdf" hidden /></label>
     <p class="hint">クライアント ID の作り方は docs/google-cloud-setup.md を参照してください。</p>`;
-  (el.querySelector('.err') as HTMLElement).textContent = error;
+  (el.querySelector('.err') as HTMLElement).textContent = error || (pendingFileId ? 'ログインすると、リンクのPDFを開きます' : '');
   const client = el.querySelector('.in-client') as HTMLInputElement;
   const folder = el.querySelector('.in-folder') as HTMLInputElement;
   client.value = config.clientId;
@@ -59,6 +67,13 @@ async function signIn(interactive: boolean): Promise<void> {
   }
   drive = new DriveClient(config.clientId);
   void store.attach(drive).then(() => shelf && refreshShelf());
+  if (pendingFileId) {
+    const id = pendingFileId;
+    pendingFileId = null;
+    clearFileIdParam();
+    await openDriveBookById(id);
+    return;
+  }
   openShelf();
 }
 
@@ -74,6 +89,7 @@ function openShelf(): void {
     states: () => store.all(),
     onOpen: (item) => void openDriveBook(item),
     onOpenLocal: (f) => void openLocalFile(f),
+    onOpenFileId: (id) => void openDriveBookById(id),
     onSettings: () => loginScreen(),
     onSignOut: () => { signOut(); drive = null; shelf = null; loginScreen(); },
   });
@@ -112,6 +128,19 @@ async function openDriveBook(item: DriveItem): Promise<void> {
   try {
     const doc = await openDrive(drive, item.id, item.size);
     startViewer(doc, item.id, item.name.replace(/\.pdf$/i, ''));
+  } catch (e) {
+    alert(`開けませんでした: ${e instanceof Error ? e.message : e}`);
+    openShelf();
+  }
+}
+
+async function openDriveBookById(fileId: string): Promise<void> {
+  if (!drive) return;
+  loadingScreen('ファイルを確認しています…');
+  try {
+    const item = await drive.getMeta(fileId);
+    if (item.mimeType !== 'application/pdf') throw new Error('PDFファイルではありません');
+    await openDriveBook(item);
   } catch (e) {
     alert(`開けませんでした: ${e instanceof Error ? e.message : e}`);
     openShelf();

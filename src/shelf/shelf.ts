@@ -1,3 +1,4 @@
+import { bookmarklet, parseFileId } from '../config';
 import { DriveClient, isFolder, type DriveItem } from '../drive/api';
 import { openDrive, type PDFDoc } from '../viewer/source';
 import type { BookStates } from '../store/progress';
@@ -8,6 +9,7 @@ export interface ShelfInit {
   states: () => BookStates;
   onOpen: (item: DriveItem) => void;
   onOpenLocal: (file: File) => void;
+  onOpenFileId: (fileId: string) => void;
   onSettings: () => void;
   onSignOut: () => void;
 }
@@ -42,9 +44,20 @@ export class Shelf {
         <button class="s-btn" data-act="settings">設定</button>
         <button class="s-btn" data-act="signout">ログアウト</button>
       </header>
+      <form class="s-url">
+        <input class="s-url-in" placeholder="Drive のリンクを貼って開く（https://drive.google.com/file/d/…）" />
+        <button class="s-btn">開く</button>
+      </form>
       <nav class="s-crumbs"></nav>
       <main class="s-grid"></main>
-      <div class="s-msg" hidden></div>`;
+      <div class="s-msg" hidden></div>
+      <footer class="s-foot">
+        <details>
+          <summary>Drive から 1 クリックで開く（ブックマークレット）</summary>
+          <p>次のリンクをブックマークバーへドラッグして保存してください。Drive で PDF を開いた状態でそのブックマークを押すと、この書庫で開きます。</p>
+          <p><a class="s-bm" draggable="true">書庫で開く</a></p>
+        </details>
+      </footer>`;
     const q = this.el.querySelector('.s-search') as HTMLInputElement;
     q.addEventListener('input', () => { this.query = q.value.trim().toLowerCase(); this.renderGrid(); });
     const sort = this.el.querySelector('.s-sort') as HTMLSelectElement;
@@ -53,6 +66,17 @@ export class Shelf {
       const f = (e.target as HTMLInputElement).files?.[0];
       if (f) this.init.onOpenLocal(f);
     });
+    const form = this.el.querySelector('.s-url') as HTMLFormElement;
+    const urlIn = this.el.querySelector('.s-url-in') as HTMLInputElement;
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const id = parseFileId(urlIn.value);
+      if (!id) { this.message('PDFファイルのリンクを貼ってください（フォルダのリンクは使えません）'); return; }
+      this.message('');
+      this.init.onOpenFileId(id);
+    });
+    // 現在のアプリのURL（?以降なし）をブックマークレットに埋め込む
+    this.el.querySelector('.s-bm')!.setAttribute('href', bookmarklet(location.origin + location.pathname));
     this.el.querySelector('[data-act=settings]')!.addEventListener('click', () => this.init.onSettings());
     this.el.querySelector('[data-act=signout]')!.addEventListener('click', () => this.init.onSignOut());
   }
