@@ -7,6 +7,8 @@ import { StateStore } from './sync';
 import { Viewer } from './viewer/viewer';
 import { openDrive, openLocal, type LoadProgress, type PDFDoc } from './viewer/source';
 import { defaultBookState } from './store/progress';
+import { confirmLargeOpen } from './confirm';
+import { addHistory, getConfirmMB, needsConfirm } from './prefs';
 
 const app = document.getElementById('app')!;
 const store = new StateStore();
@@ -173,6 +175,13 @@ function progressScreen(title: string, onCancel: () => void): { update: (p: Load
 
 async function openDriveBook(item: DriveItem): Promise<void> {
   if (!drive) return;
+  // 大きなファイルは、通信量と時間がかかるので、開く前に確認する（設定でしきい値を変えられる）
+  if (needsConfirm(item.size, getConfirmMB()) && !(await confirmLargeOpen(item.name.replace(/\.pdf$/i, ''), item.size!))) {
+    if (app.firstElementChild !== shelf?.el) openShelf(); // リンクから来た場合などは、本棚に戻す
+    return;
+  }
+  const openedAt = Date.now();
+  let fetched = 0;
   const ac = new AbortController();
   const screen = progressScreen(`「${item.name}」を開いています`, () => {
     ac.abort();
@@ -181,14 +190,18 @@ async function openDriveBook(item: DriveItem): Promise<void> {
   const bar = screen.update;
   bar({ bytes: 0, requests: 0, total: item.size, fullDownload: false });
   // 開いたあと、最初のページを描画している間も取得状況を表示するための受け口
-  let sink: (p: LoadProgress) => void = bar;
+  let sink: (p: LoadProgress) => void = (p) => { fetched = p.bytes; bar(p); };
   try {
     const doc = await openDrive(drive, item.id, item.size, { signal: ac.signal, onProgress: (p) => sink(p) });
     screen.stop();
     if (ac.signal.aborted) { void doc.destroy(); return; }
     const v = startViewer(doc, item.id, item.name.replace(/\.pdf$/i, ''));
-    sink = (p) => v.setStatus(`最初のページを描画しています…（${progressText(p)}）`);
-    void v.ready.then(() => { sink = () => {}; });
+    sink = (p) => { fetched = p.bytes; v.setStatus(`最初のページを描画しています…（${progressText(p)}）`); };
+    void v.ready.then(() => {
+      sink = () => {};
+      // 次回の確認画面で「開くまでの時間の目安」に使う
+      if (item.size) addHistory({ size: item.size, ms: Date.now() - openedAt, bytes: fetched });
+    });
   } catch (e) {
     screen.stop();
     if (ac.signal.aborted) return;

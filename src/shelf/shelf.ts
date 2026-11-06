@@ -1,5 +1,7 @@
 import { bookmarklet, parseFileId } from '../config';
 import { runDiagnostics } from '../diag';
+import { CONFIRM_CHOICES } from '../confirm';
+import { getConfirmMB, setConfirmMB } from '../prefs';
 import { DriveClient, isFolder, type DriveItem } from '../drive/api';
 import { openDrive, type PDFDoc } from '../viewer/source';
 import type { BookStates } from '../store/progress';
@@ -14,6 +16,9 @@ export interface ShelfInit {
   onSettings: () => void;
   onSignOut: () => void;
 }
+
+/** これ以上大きいファイルは、サムネイルが無くても自動では取得しない */
+const AUTO_COVER_MAX_BYTES = 30e6;
 
 type Sort = 'recent' | 'name';
 
@@ -59,6 +64,10 @@ export class Shelf {
           <p><a class="s-bm" draggable="true">書庫で開く</a></p>
         </details>
         <details>
+          <summary>大きなファイルを開くときの確認</summary>
+          <p><label>確認を出すサイズ: <select class="s-confirm"></select></label></p>
+        </details>
+        <details>
           <summary>通信診断（読み込みが遅いとき）</summary>
           <p>このフォルダの一番大きい PDF で、Drive との通信を測ります（数十秒かかります。通信量は 30MB ほどです）。</p>
           <p><button class="s-btn" data-act="diag">診断を実行</button></p>
@@ -84,6 +93,16 @@ export class Shelf {
     });
     // 現在のアプリのURL（?以降なし）をブックマークレットに埋め込む
     this.el.querySelector('.s-bm')!.setAttribute('href', bookmarklet(location.origin + location.pathname));
+    const confirmSel = this.el.querySelector('.s-confirm') as HTMLSelectElement;
+    const cur = getConfirmMB();
+    for (const mb of [...new Set([...CONFIRM_CHOICES, cur])].sort((a, b) => a - b)) {
+      const o = document.createElement('option');
+      o.value = String(mb);
+      o.textContent = mb === 0 ? '確認しない' : `${mb} MB 以上`;
+      o.selected = mb === cur;
+      confirmSel.append(o);
+    }
+    confirmSel.addEventListener('change', () => setConfirmMB(Number(confirmSel.value)));
     this.el.querySelector('[data-act=diag]')!.addEventListener('click', () => void this.diagnose());
     this.el.querySelector('[data-act=settings]')!.addEventListener('click', () => this.init.onSettings());
     this.el.querySelector('[data-act=signout]')!.addEventListener('click', () => this.init.onSignOut());
@@ -183,6 +202,8 @@ export class Shelf {
 
   /** サムネイルが無い本は、1ページ目を自前で描画して表紙にする（1冊ずつ順番に） */
   private queueCover(item: DriveItem, thumb: HTMLElement): void {
+    // 大きなファイルは、表紙のためだけに数十 MB を勝手に取得しない（開くときに確認する）
+    if ((item.size ?? 0) >= AUTO_COVER_MAX_BYTES) { thumb.textContent = 'PDF'; return; }
     const run = async () => {
       if (!thumb.isConnected) return;
       let doc: PDFDoc | undefined;
