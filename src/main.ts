@@ -9,6 +9,8 @@ import { openDrive, openLocal, type LoadProgress, type PDFDoc } from './viewer/s
 import { defaultBookState } from './store/progress';
 import { confirmLargeOpen } from './confirm';
 import { addHistory, getConfirmMB, needsConfirm } from './prefs';
+import { askPersistOnce, getBlockStore, getCacheLimitMB } from './cache/instance';
+import { fileCacheKey } from './cache/store';
 
 const app = document.getElementById('app')!;
 const store = new StateStore();
@@ -132,7 +134,8 @@ function progressText(p: LoadProgress): string {
   if (p.fullDownload && p.total) {
     return `ダウンロード中: ${fmtMB(p.bytes)} / ${fmtMB(p.total)}（${Math.min(100, Math.floor((p.bytes / p.total) * 100))}%）`;
   }
-  return `取得済み ${fmtMB(p.bytes)}（${p.requests} 回の通信）`;
+  const saved = p.cachedBytes > 0 ? `・保存済みデータ ${fmtMB(p.cachedBytes)} を使用` : '';
+  return `取得済み ${fmtMB(p.bytes)}（${p.requests} 回の通信）${saved}`;
 }
 
 /** 進捗つきの読み込み画面。update に取得状況を渡すと表示が変わる */
@@ -175,8 +178,15 @@ function progressScreen(title: string, onCancel: () => void): { update: (p: Load
 
 async function openDriveBook(item: DriveItem): Promise<void> {
   if (!drive) return;
-  // 大きなファイルは、通信量と時間がかかるので、開く前に確認する（設定でしきい値を変えられる）
-  if (needsConfirm(item.size, getConfirmMB()) && !(await confirmLargeOpen(item.name.replace(/\.pdf$/i, ''), item.size!))) {
+  // 保存領域: 一度開いたデータが残っていれば、通信せずに読める（上限 0 のときは使わない）
+  const limitMB = getCacheLimitMB();
+  const store = limitMB > 0 ? await getBlockStore() : null;
+  const cacheKey = fileCacheKey(item.id, item.modifiedTime ?? item.size);
+  const alreadySaved = store ? await store.cachedBytes(cacheKey) : 0;
+  // 大きなファイルは、通信量と時間がかかるので、開く前に確認する（設定でしきい値を変えられる）。
+  // すでに十分な量を保存済みなら、通信はわずかで済むので確認しない
+  const mostlySaved = !!item.size && alreadySaved >= Math.min(item.size, 16e6);
+  if (!mostlySaved && needsConfirm(item.size, getConfirmMB()) && !(await confirmLargeOpen(item.name.replace(/\.pdf$/i, ''), item.size!))) {
     if (app.firstElementChild !== shelf?.el) openShelf(); // リンクから来た場合などは、本棚に戻す
     return;
   }
@@ -188,11 +198,15 @@ async function openDriveBook(item: DriveItem): Promise<void> {
     openShelf();
   });
   const bar = screen.update;
-  bar({ bytes: 0, requests: 0, total: item.size, fullDownload: false });
+  bar({ bytes: 0, requests: 0, total: item.size, fullDownload: false, cachedBytes: 0 });
   // 開いたあと、最初のページを描画している間も取得状況を表示するための受け口
   let sink: (p: LoadProgress) => void = (p) => { fetched = p.bytes; bar(p); };
   try {
-    const doc = await openDrive(drive, item.id, item.size, { signal: ac.signal, onProgress: (p) => sink(p) });
+    const doc = await openDrive(drive, item.id, item.size, {
+      signal: ac.signal,
+      onProgress: (p) => sink(p),
+      cache: store ? { store, key: cacheKey, fileId: item.id, name: item.name } : undefined,
+    });
     screen.stop();
     if (ac.signal.aborted) { void doc.destroy(); return; }
     const v = startViewer(doc, item.id, item.name.replace(/\.pdf$/i, ''));
@@ -200,7 +214,13 @@ async function openDriveBook(item: DriveItem): Promise<void> {
     void v.ready.then(() => {
       sink = () => {};
       // 次回の確認画面で「開くまでの時間の目安」に使う
-      if (item.size) addHistory({ size: item.size, ms: Date.now() - openedAt, bytes: fetched });
+      if (item.size && fetched > 0) addHistory({ size: item.size, ms: Date.now() - openedAt, bytes: fetched });
+      // 保存領域の後始末: 更新前の古い版を消し、上限を超えたら使っていない本から消す
+      if (store) {
+        askPersistOnce();
+        void store.touch(cacheKey);
+        void store.removeOtherVersions(item.id, cacheKey).then(() => store.trim(limitMB * 1e6, cacheKey)).catch(() => {});
+      }
     });
   } catch (e) {
     screen.stop();

@@ -46,6 +46,7 @@ button, input, select { font: inherit; color: inherit; }
 .s-name { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }
 .s-prog { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .s-prog i { display: block; height: 100%; background: var(--accent); }
+.s-saved { font-size: 11px; color: var(--accent); }
 .s-msg { padding: 24px; text-align: center; color: var(--muted); }
 
 .s-url { display: flex; gap: 8px; padding: 4px 0 8px; }

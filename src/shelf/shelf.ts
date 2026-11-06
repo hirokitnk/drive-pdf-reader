@@ -2,6 +2,7 @@ import { bookmarklet, parseFileId } from '../config';
 import { runDiagnostics } from '../diag';
 import { CONFIRM_CHOICES } from '../confirm';
 import { getConfirmMB, setConfirmMB } from '../prefs';
+import { CACHE_LIMIT_CHOICES, getBlockStore, getCacheLimitMB, setCacheLimitMB } from '../cache/instance';
 import { DriveClient, isFolder, type DriveItem } from '../drive/api';
 import { openDrive, type PDFDoc } from '../viewer/source';
 import type { BookStates } from '../store/progress';
@@ -29,6 +30,8 @@ export class Shelf {
   private query = '';
   private sort: Sort = 'recent';
   private coverQueue: Promise<void> = Promise.resolve();
+  /** 保存データがある本（ファイルID → 保存済みバイト数） */
+  private saved = new Map<string, number>();
 
   constructor(private init: ShelfInit) {
     this.el.className = 'shelf';
@@ -62,6 +65,13 @@ export class Shelf {
           <summary>Drive から 1 クリックで開く（ブックマークレット）</summary>
           <p>次のリンクをブックマークバーへドラッグして保存してください。Drive で PDF を開いた状態でそのブックマークを押すと、この書庫で開きます。</p>
           <p><a class="s-bm" draggable="true">書庫で開く</a></p>
+        </details>
+        <details class="s-cache">
+          <summary>保存データ（再ダウンロードを避ける）</summary>
+          <p>一度開いた本のデータをこの端末に保存し、次回は通信せずに読みます。</p>
+          <p><label>保存の上限: <select class="s-cache-limit"></select></label></p>
+          <p class="s-cache-usage">計算中…</p>
+          <p><button class="s-btn" data-act="cache-clear">保存データをすべて削除</button></p>
         </details>
         <details>
           <summary>大きなファイルを開くときの確認</summary>
@@ -103,9 +113,43 @@ export class Shelf {
       confirmSel.append(o);
     }
     confirmSel.addEventListener('change', () => setConfirmMB(Number(confirmSel.value)));
+    const limitSel = this.el.querySelector('.s-cache-limit') as HTMLSelectElement;
+    const curLimit = getCacheLimitMB();
+    for (const mb of [...new Set([...CACHE_LIMIT_CHOICES, curLimit])].sort((a, b) => a - b)) {
+      const o = document.createElement('option');
+      o.value = String(mb);
+      o.textContent = mb === 0 ? '保存しない' : mb >= 1000 ? `${mb / 1000} GB` : `${mb} MB`;
+      o.selected = mb === curLimit;
+      limitSel.append(o);
+    }
+    limitSel.addEventListener('change', async () => {
+      const mb = Number(limitSel.value);
+      setCacheLimitMB(mb);
+      const store = await getBlockStore();
+      if (store) await (mb === 0 ? store.clear() : store.trim(mb * 1e6));
+      void this.refreshCacheInfo();
+    });
+    this.el.querySelector('[data-act=cache-clear]')!.addEventListener('click', async () => {
+      await (await getBlockStore())?.clear();
+      void this.refreshCacheInfo();
+    });
+    void this.refreshCacheInfo();
     this.el.querySelector('[data-act=diag]')!.addEventListener('click', () => void this.diagnose());
     this.el.querySelector('[data-act=settings]')!.addEventListener('click', () => this.init.onSettings());
     this.el.querySelector('[data-act=signout]')!.addEventListener('click', () => this.init.onSignOut());
+  }
+
+  /** 保存データの使用量を表示し、各本のカードに「保存済み」の印を付ける */
+  private async refreshCacheInfo(): Promise<void> {
+    const usage = this.el.querySelector('.s-cache-usage') as HTMLElement | null;
+    const store = await getBlockStore();
+    if (!usage) return;
+    if (!store) { usage.textContent = 'この環境では保存データを使えません'; return; }
+    const metas = await store.list();
+    const total = metas.reduce((a, m) => a + m.bytes, 0);
+    usage.textContent = `使用中: ${(total / 1e6).toFixed(0)} MB（${metas.length} 冊）`;
+    this.saved = new Map(metas.map((m) => [m.fileId, m.bytes]));
+    this.renderGrid();
   }
 
   private async diagnose(): Promise<void> {
@@ -177,7 +221,13 @@ export class Shelf {
   private bookCard(item: DriveItem, st?: BookStates[string]): HTMLElement {
     const card = document.createElement('button');
     card.className = 's-card';
-    card.innerHTML = '<div class="s-thumb"></div><div class="s-name"></div><div class="s-prog"><i></i></div>';
+    card.innerHTML = '<div class="s-thumb"></div><div class="s-name"></div><div class="s-prog"><i></i></div><div class="s-saved" hidden></div>';
+    const savedBytes = this.saved.get(item.id);
+    if (savedBytes) {
+      const badge = card.querySelector('.s-saved') as HTMLElement;
+      badge.hidden = false;
+      badge.textContent = `保存済み ${(savedBytes / 1e6).toFixed(0)} MB`;
+    }
     (card.querySelector('.s-name') as HTMLElement).textContent = item.name.replace(/\.pdf$/i, '');
     const thumb = card.querySelector('.s-thumb') as HTMLElement;
     const fill = card.querySelector('.s-prog i') as HTMLElement;

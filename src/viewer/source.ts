@@ -2,6 +2,7 @@ import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { DriveClient } from '../drive/api';
 import { BlockLoader } from './blocks';
+import type { BlockStore } from '../cache/store';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -46,10 +47,14 @@ export interface LoadProgress {
   total?: number;
   /** ファイル全体をダウンロードしている（Range が使えない場合） */
   fullDownload: boolean;
+  /** 保存済みのデータから読んだ量（通信しなかった分） */
+  cachedBytes: number;
 }
 
 export interface OpenOptions {
   signal?: AbortSignal;
+  /** 取得したブロックを保存し、次回は保存済みのものを使う */
+  cache?: { store: BlockStore; key: string; fileId: string; name: string };
   /** 開いたあと（最初のページの描画中など）も、取得のたびに呼ばれる */
   onProgress?: (p: LoadProgress) => void;
 }
@@ -61,7 +66,7 @@ export interface OpenOptions {
 export async function openDrive(
   drive: DriveClient, fileId: string, size: number | undefined, o: OpenOptions = {},
 ): Promise<PDFDoc> {
-  const prog: LoadProgress = { bytes: 0, requests: 0, total: size, fullDownload: false };
+  const prog: LoadProgress = { bytes: 0, requests: 0, total: size, fullDownload: false, cachedBytes: 0 };
   let lastEmit = 0;
   const emit = (force = false) => {
     const now = performance.now();
@@ -80,11 +85,19 @@ export async function openDrive(
     return pdfjs.getDocument({ data, ...DOC_OPTS }).promise;
   };
   const fetchBlock = async (begin: number, end: number): Promise<Uint8Array> => {
+    const idx = begin / BLOCK_SIZE;
+    const cache = o.cache;
+    if (cache) {
+      const hit = await cache.store.get(cache.key, idx, end - begin);
+      if (hit) { prog.cachedBytes += hit.length; emit(); return hit; }
+    }
     prog.requests++;
     const chunk = await drive.fetchRange(fileId, begin, end, o.signal);
     if (!chunk) throw new Error('Drive が範囲指定の取得に応じませんでした');
     prog.bytes += chunk.length;
     emit();
+    // 保存は「あれば使う」もの。失敗（容量不足など）しても読書は止めない
+    if (cache) void cache.store.put(cache.key, idx, chunk, { fileId: cache.fileId, name: cache.name }).catch(() => {});
     return chunk;
   };
 
