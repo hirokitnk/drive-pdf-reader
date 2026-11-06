@@ -25,11 +25,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      # クライアント ID は .env（公開してよい値）から読み込まれる
       - run: npm run build
-        env:
-          # リポジトリの Settings → Secrets and variables → Actions → Variables で設定（任意）
-          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
-          VITE_DRIVE_FOLDER_ID: ${{ vars.VITE_DRIVE_FOLDER_ID }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

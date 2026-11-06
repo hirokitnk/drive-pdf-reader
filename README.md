@@ -34,7 +34,7 @@ Google Workspace Marketplace の「アプリで開く」連携は、個人（Gma
    npm install
    npm run dev     # http://localhost:5173
    ```
-3. ログイン画面にクライアント ID とフォルダを入力してログイン。
+3. クライアント ID は `.env` に設定済みです（変える場合は `.env` かログイン画面で）。フォルダを入力してログイン。
    ログインせずに「PDF を開く」から端末内のファイルを開くこともできます（ビューアの確認用）。
 
 ```sh
