@@ -1,5 +1,5 @@
 import {
-  buildSpreads, isWideSize, resolveDouble, spreadIndexOfPage, swipeDir, tapSide, visualOrder,
+  buildSpreads, isIOS, isWideSize, resolveDouble, spreadIndexOfPage, swipeDir, tapSide, visualOrder,
   type Direction, type SpreadMode,
 } from './layout';
 import { detectDirection, type PDFDoc } from './source';
@@ -17,8 +17,19 @@ export interface ViewerInit {
 const MAX_ZOOM = 5;
 const SWIPE_MIN = 50;
 const EDGE_OVERSHOOT = 80;
-const CACHE_SIZE = 5;
-const MAX_CANVAS_PIXELS = 12_000_000;
+/**
+ * iOS（iPhone / iPad の Chrome・Safari も含む）は、キャンバスのメモリ合計に厳しい上限があり、超えると
+ * 表示中のキャンバスまで中身が消えて真っ黒になる。そのため iOS では、描画解像度・キャンバス 1 枚の大きさ・
+ * 保持する合計（予算）を小さく抑え、先読みも控えめにする。
+ */
+const LOW_MEM = isIOS(navigator.userAgent, navigator.platform, navigator.maxTouchPoints);
+const MAX_DPR = LOW_MEM ? 2 : 3;
+/** キャンバス 1 枚の最大ピクセル数（iOS の上限は約 16.7M） */
+const MAX_CANVAS_PIXELS = LOW_MEM ? 5_000_000 : 12_000_000;
+/** 保持するキャンバスの合計ピクセル数（4 バイト/ピクセル。iOS 24M = 約 96MB） */
+const CANVAS_BUDGET_PX = LOW_MEM ? 24_000_000 : 120_000_000;
+/** 先読みするスプレッド（現在位置からの差） */
+const PREFETCH_OFFSETS = LOW_MEM ? [1] : [1, -1, 2];
 /** 連続でページを送っている間は先読みや全ページの調査を控える */
 const IDLE_MS = 300;
 /** 現在位置の前後、何スプレッド分の縦横サイズを先に調べるか */
@@ -35,6 +46,7 @@ function cancelJob(j: Job | null): void {
 }
 class CancelledError extends Error {}
 function releaseCanvas(c: HTMLCanvasElement): void {
+  if (c.isConnected) return; // 表示中のキャンバスを空にすると、画面が真っ黒になる
   c.width = 0; // GPU/メモリを早めに手放す
   c.height = 0;
 }
@@ -70,6 +82,9 @@ export class Viewer {
   private ty = 0;
   private renderZoom = 1;
   private baseSize: Size = { w: 0, h: 0 };
+  /** レイアウトを組んだときの画面サイズ。描画と、キャッシュの鍵はこれを使う（iOS のツールバーの出入りで揺れないように） */
+  private viewSize: Size = { w: 0, h: 0 };
+  private resizeTimer = 0;
   private cache = new Map<string, HTMLCanvasElement[]>();
   private displayedKey = '';
   private displayJob: Job | null = null;
@@ -84,7 +99,18 @@ export class Viewer {
   private uiVisible = true;
 
   private keyHandler = (e: KeyboardEvent) => this.onKey(e);
-  private resizeHandler = () => this.relayout();
+  private resizeHandler = () => {
+    // iOS では、ツールバーの出入りのたびに resize が何度も来る。落ち着いてから、大きく変わったときだけ組み直す
+    window.clearTimeout(this.resizeTimer);
+    this.resizeTimer = window.setTimeout(() => {
+      if (this.disposed) return;
+      const r = this.stage.getBoundingClientRect();
+      const dw = Math.abs(r.width - this.viewSize.w);
+      const dh = Math.abs(r.height - this.viewSize.h);
+      if (dw < 2 && dh < Math.max(140, this.viewSize.h * 0.2)) return; // 高さだけの小さな変化（ツールバー）は無視
+      this.relayout();
+    }, 250);
+  };
 
   constructor(init: ViewerInit) {
     this.doc = init.doc;
@@ -165,6 +191,7 @@ export class Viewer {
   // ---------- レイアウト ----------
   private layout(page: number): void {
     const r = this.stage.getBoundingClientRect();
+    this.viewSize = { w: r.width, h: r.height };
     this.double = resolveDouble(this.state.spreadMode, r.width, r.height);
     this.spreads = buildSpreads({
       numPages: this.doc.numPages,
@@ -175,6 +202,15 @@ export class Viewer {
     this.cur = spreadIndexOfPage(this.spreads, page);
     this.clearCache();
     this.refreshUi();
+  }
+
+  /** 表示するキャンバスを入れ替える。入れ替えで外れた古いキャンバスのうち、キャッシュにも無いものは解放する */
+  private swapIn(canvases: HTMLCanvasElement[]): void {
+    const old = Array.from(this.content.children) as HTMLCanvasElement[];
+    this.content.replaceChildren(...canvases);
+    const keep = new Set<HTMLCanvasElement>(canvases);
+    for (const cs of this.cache.values()) cs.forEach((c) => keep.add(c));
+    for (const c of old) if (!keep.has(c)) releaseCanvas(c);
   }
 
   private clearCache(): void {
@@ -231,7 +267,7 @@ export class Viewer {
     if (this.displayJob === job) this.displayJob = null;
     if (!canvases || job.cancelled || spread !== this.cur || this.disposed) return;
     this.displayedKey = this.cacheKey(spread, this.renderZoom);
-    this.content.replaceChildren(...canvases);
+    this.swapIn(canvases);
     this.applyTransform();
     this.refreshUi();
     // 実際に画面に出ているページ（テストや診断用）
@@ -250,8 +286,7 @@ export class Viewer {
   }
 
   private cacheKey(spread: number, rz: number): string {
-    const r = this.stage.getBoundingClientRect();
-    return `${spread}:${rz}:${Math.round(r.width)}x${Math.round(r.height)}:${this.double}:${this.direction}`;
+    return `${spread}:${rz}:${Math.round(this.viewSize.w)}x${Math.round(this.viewSize.h)}:${this.double}:${this.direction}`;
   }
 
   /** 指定スプレッドのキャンバスを返す。キャンセルされたら null */
@@ -266,11 +301,10 @@ export class Viewer {
     const sizes = pages.map((p) => this.sizes[p]!);
     const totalW = sizes.reduce((a, s) => a + s.w, 0);
     const maxH = Math.max(...sizes.map((s) => s.h));
-    const r = this.stage.getBoundingClientRect();
-    const fit = Math.min(r.width / totalW, r.height / maxH);
+    const fit = Math.min(this.viewSize.w / totalW, this.viewSize.h / maxH);
     if (spread === this.cur) this.baseSize = { w: totalW * fit, h: maxH * fit };
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     try {
       const canvases = await Promise.all(pages.map(async (p, i) => {
         const page = await this.doc.getPage(p + 1);
@@ -308,14 +342,22 @@ export class Viewer {
     }
   }
 
-  /** キャッシュが増えすぎたら古いものから捨てる（表示中のものは残す）。キャンバスのメモリも明示的に解放する */
+  /** キャッシュの合計ピクセル数 */
+  private cachedPixels(): number {
+    let n = 0;
+    for (const cs of this.cache.values()) for (const c of cs) n += c.width * c.height;
+    return n;
+  }
+
+  /** キャッシュの合計が予算を超えたら、古いものから捨てる（表示中のものは残す）。キャンバスのメモリも明示的に解放する */
   private evict(): void {
     for (const key of this.cache.keys()) {
-      if (this.cache.size <= CACHE_SIZE) break;
+      if (this.cache.size <= 1 || this.cachedPixels() <= CANVAS_BUDGET_PX) break;
       if (key === this.displayedKey) continue;
       this.cache.get(key)!.forEach(releaseCanvas);
       this.cache.delete(key);
     }
+    this.el.dataset.canvasMpx = (this.cachedPixels() / 1e6).toFixed(1);
   }
 
   /** 前後のスプレッドを先に描画しておく（操作が始まったら中断する） */
@@ -323,7 +365,7 @@ export class Viewer {
     cancelJob(this.prefetchJob);
     const job = newJob();
     this.prefetchJob = job;
-    for (const d of [1, -1, 2]) {
+    for (const d of PREFETCH_OFFSETS) {
       if (job.cancelled || this.disposed) return;
       const idx = this.cur + d;
       if (idx < 0 || idx >= this.spreads.length) continue;
@@ -365,7 +407,7 @@ export class Viewer {
       // 描き直した分、CSSの倍率は掛け直さない（CSSサイズは常に等倍）
       this.renderZoom = rz;
       this.displayedKey = this.cacheKey(spread, rz);
-      this.content.replaceChildren(...canvases);
+      this.swapIn(canvases);
       this.applyTransform();
     }, 250);
   }
@@ -652,6 +694,7 @@ export class Viewer {
     cancelJob(this.displayJob);
     cancelJob(this.prefetchJob);
     window.clearTimeout(this.zoomTimer);
+    window.clearTimeout(this.resizeTimer);
     window.removeEventListener('keydown', this.keyHandler);
     window.removeEventListener('resize', this.resizeHandler);
     void this.doc.destroy();

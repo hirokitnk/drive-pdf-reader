@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildSpreads, isWideSize, resolveDouble, spreadIndexOfPage, swipeDir, tapSide, visualOrder,
+  buildSpreads, isIOS, isWideSize, resolveDouble, spreadIndexOfPage, swipeDir, tapSide, visualOrder,
 } from '../src/viewer/layout';
 
 const none = () => false;
@@ -76,5 +76,21 @@ describe('resolveDouble / isWideSize', () => {
     expect(isWideSize(1200, 800)).toBe(true);
     expect(isWideSize(800, 1200)).toBe(false);
     expect(isWideSize(100, 100)).toBe(false);
+  });
+});
+
+describe('isIOS', () => {
+  it('iPhone / iPad の Chrome・Safari を判定する', () => {
+    const chromeIos = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 CriOS/126.0.0.0 Mobile/15E148 Safari/604.1';
+    expect(isIOS(chromeIos, 'iPhone', 5)).toBe(true);
+    expect(isIOS('Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X)', 'iPad', 5)).toBe(true);
+  });
+  it('iPadOS（Mac を名乗る）はタッチの有無で判定する', () => {
+    expect(isIOS('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'MacIntel', 5)).toBe(true);
+    expect(isIOS('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'MacIntel', 0)).toBe(false);
+  });
+  it('Windows / Android / Linux は対象外', () => {
+    expect(isIOS('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126', 'Win32', 0)).toBe(false);
+    expect(isIOS('Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/126 Mobile', 'Linux armv8l', 5)).toBe(false);
   });
 });

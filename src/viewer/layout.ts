@@ -76,3 +76,11 @@ export function resolveDouble(mode: SpreadMode, viewportW: number, viewportH: nu
 export function isWideSize(width: number, height: number): boolean {
   return width > height * 1.05;
 }
+
+/**
+ * iOS（iPhone / iPad の Chrome・Safari も含む）かどうか。iPadOS は Mac を名乗るので、タッチの有無でも判定する。
+ * iOS はキャンバスのメモリ合計に厳しい上限があるため、描画の設定を控えめにするのに使う。
+ */
+export function isIOS(ua: string, platform: string, maxTouchPoints: number): boolean {
+  return /iPhone|iPad|iPod/.test(ua) || (platform === 'MacIntel' && maxTouchPoints > 1);
+}
