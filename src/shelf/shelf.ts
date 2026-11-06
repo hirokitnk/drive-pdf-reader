@@ -60,7 +60,7 @@ export class Shelf {
         </details>
         <details>
           <summary>通信診断（読み込みが遅いとき）</summary>
-          <p>このフォルダの一番大きい PDF で、Drive との通信を測ります（数十秒かかります。通信量は 10MB ほどです）。</p>
+          <p>このフォルダの一番大きい PDF で、Drive との通信を測ります（数十秒かかります。通信量は 30MB ほどです）。</p>
           <p><button class="s-btn" data-act="diag">診断を実行</button></p>
           <pre class="s-diag"></pre>
         </details>
@@ -186,8 +186,9 @@ export class Shelf {
     const run = async () => {
       if (!thumb.isConnected) return;
       let doc: PDFDoc | undefined;
+      const ac = new AbortController();
       try {
-        doc = await openDrive(this.init.drive, item.id, item.size);
+        doc = await openDrive(this.init.drive, item.id, item.size, { signal: ac.signal });
         const page = await doc.getPage(1);
         const vp = page.getViewport({ scale: 240 / page.getViewport({ scale: 1 }).width });
         const canvas = document.createElement('canvas');
@@ -198,6 +199,7 @@ export class Shelf {
       } catch {
         thumb.textContent = 'PDF';
       } finally {
+        ac.abort(); // 表紙を取ったら、先読みの通信も止める
         void doc?.destroy();
       }
     };

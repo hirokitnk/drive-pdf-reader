@@ -3,6 +3,7 @@
 import type { DriveClient, DriveItem } from './drive/api';
 
 const API = 'https://www.googleapis.com/drive/v3';
+const DOWNLOAD = 'https://www.googleapis.com/download/drive/v3';
 
 interface Sample { label: string; ms: number; ttfb?: number; bytes?: number; note?: string }
 
@@ -19,12 +20,11 @@ async function timed(label: string, run: () => Promise<{ bytes: number; ttfb: nu
   }
 }
 
-/** Range 取得を 1 回行う。トークンはヘッダ（既定）か URL（viaQuery）で渡す */
-async function range(token: string, id: string, begin: number, len: number, viaQuery: boolean) {
+/** Range 取得を 1 回行う。ダウンロード専用のパス（/download/）を使うかを選べる */
+async function range(token: string, id: string, begin: number, len: number, downloadPath: boolean) {
   const t0 = performance.now();
-  const url = `${API}/files/${id}?alt=media&supportsAllDrives=true${viaQuery ? `&access_token=${encodeURIComponent(token)}` : ''}`;
-  const headers: Record<string, string> = { Range: `bytes=${begin}-${begin + len - 1}` };
-  if (!viaQuery) headers.Authorization = `Bearer ${token}`;
+  const url = `${downloadPath ? DOWNLOAD : API}/files/${id}?alt=media&supportsAllDrives=true`;
+  const headers: Record<string, string> = { Range: `bytes=${begin}-${begin + len - 1}`, Authorization: `Bearer ${token}` };
   const res = await fetch(url, { headers });
   const ttfb = performance.now() - t0;
   if (res.status !== 206) throw new Error(`HTTP ${res.status}`);
@@ -65,16 +65,16 @@ export async function runDiagnostics(drive: DriveClient, item: DriveItem, log: (
   emit('■ 2. Range 64KB を順番に x4（トークンはヘッダ）');
   for (let i = 0; i < 4; i++) show(await timed(`64KB #${i + 1}`, () => range(token, item.id, pos(i), 65536, false)));
   emit();
-  emit('■ 3. Range 64KB を順番に x4（トークンを URL に付ける）');
-  for (let i = 0; i < 4; i++) show(await timed(`64KB(URL) #${i + 1}`, () => range(token, item.id, pos(i + 4), 65536, true)));
+  emit('■ 3. Range 64KB を順番に x4（ダウンロード専用の URL）');
+  for (let i = 0; i < 4; i++) show(await timed(`64KB(/download/) #${i + 1}`, () => range(token, item.id, pos(i + 4), 65536, true)));
   emit();
   emit('■ 4. Range 4MB を 1 回（帯域の目安）');
   show(await timed('4MB', () => range(token, item.id, pos(1), 4 * 1024 * 1024, false)));
   emit();
-  emit('■ 5. Range 1MB を 4 本同時（並列にすると速くなるか）');
+  emit('■ 5. Range 4MB を 4 本同時（アプリの実際の取得方法に近い）');
   const t0 = performance.now();
   const par = await Promise.all([0, 1, 2, 3].map((i) =>
-    timed(`1MB 並列 #${i + 1}`, () => range(token, item.id, pos(i + 2), 1024 * 1024, false))));
+    timed(`4MB 並列 #${i + 1}`, () => range(token, item.id, pos(i + 2), 4 * 1024 * 1024, false))));
   par.forEach(show);
   emit(`  → 4 本の合計所要: ${fmt(performance.now() - t0)}`);
   emit();
