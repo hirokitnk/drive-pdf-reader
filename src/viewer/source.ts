@@ -109,7 +109,9 @@ export async function openDrive(
     readAhead: READ_AHEAD,
     maxCachedBlocks: MAX_CACHED_BLOCKS,
     fetchBlock,
-    deliver: (begin, chunk) => transport.onDataRange(begin, chunk),
+    // PDF.js は requestDataRange を呼んだ「あと」で受け取り側を登録するため、キャッシュから即答する場合も
+    // 返答を 1 拍遅らせる（同期的に返すと「reader が見つからない」エラーになる）
+    deliver: (begin, chunk) => queueMicrotask(() => transport.onDataRange(begin, chunk)),
     onError: (e) => fail(e),
   });
   class DriveTransport extends pdfjs.PDFDataRangeTransport {
