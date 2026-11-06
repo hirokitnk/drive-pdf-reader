@@ -43,6 +43,10 @@ type Size = { w: number; h: number };
 
 export class Viewer {
   readonly el: HTMLElement;
+  /** 最初のページが画面に出たら解決する */
+  readonly ready: Promise<void>;
+  private resolveReady!: () => void;
+  private loadingEl!: HTMLElement;
   private doc: PDFDoc;
   private state: BookState;
   private onState: (s: BookState) => void;
@@ -89,6 +93,7 @@ export class Viewer {
     this.onClose = init.onClose;
     this.el = document.createElement('div');
     this.el.className = 'viewer';
+    this.ready = new Promise((r) => { this.resolveReady = r; });
     this.build(init.title);
     window.addEventListener('keydown', this.keyHandler);
     window.addEventListener('resize', this.resizeHandler);
@@ -231,6 +236,8 @@ export class Viewer {
     this.refreshUi();
     // 実際に画面に出ているページ（テストや診断用）
     this.el.dataset.shown = String(this.spreads[spread]?.[0] ?? 0);
+    this.loadingEl.hidden = true;
+    this.resolveReady();
   }
 
   /** 操作が落ち着いたら、周辺の調査と先読みを始める */
@@ -412,7 +419,9 @@ export class Viewer {
           <input class="v-slider" type="range" min="0" value="0" aria-label="ページ" />
         </div>
       </div>
+      <div class="v-loading"><div class="v-spinner"></div><div class="v-loading-text">最初のページを描画しています…</div></div>
       <div class="v-toast" hidden></div>`;
+    this.loadingEl = this.el.querySelector('.v-loading')!;
     this.stage = this.el.querySelector('.v-stage')!;
     this.content = this.el.querySelector('.v-content')!;
     this.ui = this.el.querySelector('.v-ui')!;
@@ -448,6 +457,12 @@ export class Viewer {
     this.slider.addEventListener('change', () => this.jumpPage(Number(this.slider.value)));
     this.slider.addEventListener('pointerdown', (e) => e.stopPropagation());
     this.bindGestures();
+  }
+
+  /** 最初のページが出るまでの、読み込み状況の表示を更新する */
+  setStatus(text: string): void {
+    const t = this.loadingEl.querySelector('.v-loading-text');
+    if (t) t.textContent = text;
   }
 
   private labelFor(page: number): string {

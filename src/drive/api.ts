@@ -77,17 +77,36 @@ export class DriveClient {
   }
 
   /** 指定範囲のバイト列を取得する。サーバーが Range を無視したら null を返す */
-  async fetchRange(fileId: string, begin: number, endExclusive: number): Promise<Uint8Array | null> {
+  async fetchRange(fileId: string, begin: number, endExclusive: number, signal?: AbortSignal): Promise<Uint8Array | null> {
     const res = await this.fetchAuthed(`${API}/files/${fileId}?alt=media&supportsAllDrives=true`, {
       headers: { Range: `bytes=${begin}-${endExclusive - 1}` },
+      signal,
     });
-    if (res.status !== 206) return null;
+    if (res.status !== 206) {
+      void res.body?.cancel(); // 全体が返ってきたら、読まずに捨てる
+      return null;
+    }
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  async fetchAll(fileId: string): Promise<Uint8Array> {
-    const res = await this.fetchAuthed(`${API}/files/${fileId}?alt=media&supportsAllDrives=true`);
-    return new Uint8Array(await res.arrayBuffer());
+  /** ファイル全体を取得する。onProgress で取得済みバイト数を通知する */
+  async fetchAll(fileId: string, o: { signal?: AbortSignal; onProgress?: (loaded: number) => void } = {}): Promise<Uint8Array> {
+    const res = await this.fetchAuthed(`${API}/files/${fileId}?alt=media&supportsAllDrives=true`, { signal: o.signal });
+    if (!res.body) return new Uint8Array(await res.arrayBuffer());
+    const reader = res.body.getReader();
+    const parts: Uint8Array[] = [];
+    let loaded = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      loaded += value.length;
+      o.onProgress?.(loaded);
+    }
+    const out = new Uint8Array(loaded);
+    let off = 0;
+    for (const part of parts) { out.set(part, off); off += part.length; }
+    return out;
   }
 
   // ---- 読書位置の同期（appDataFolder） ----

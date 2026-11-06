@@ -5,7 +5,7 @@ import { DriveClient, type DriveItem } from './drive/api';
 import { Shelf } from './shelf/shelf';
 import { StateStore } from './sync';
 import { Viewer } from './viewer/viewer';
-import { openDrive, openLocal, type PDFDoc } from './viewer/source';
+import { openDrive, openLocal, type LoadProgress, type PDFDoc } from './viewer/source';
 import { defaultBookState } from './store/progress';
 
 const app = document.getElementById('app')!;
@@ -97,7 +97,7 @@ function openShelf(): void {
 }
 
 // ---------- 本を開く ----------
-function startViewer(doc: PDFDoc, key: string, title: string): void {
+function startViewer(doc: PDFDoc, key: string, title: string): Viewer {
   viewer?.dispose();
   const v = new Viewer({
     doc,
@@ -113,6 +113,7 @@ function startViewer(doc: PDFDoc, key: string, title: string): void {
   });
   viewer = v;
   showScreen(v.el);
+  return v;
 }
 
 function loadingScreen(text: string): void {
@@ -122,13 +123,75 @@ function loadingScreen(text: string): void {
   showScreen(el);
 }
 
+const fmtMB = (n: number) => `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
+
+/** 取得状況の表示文（取得量・回数。Range が使えず全体を取る場合は割合も） */
+function progressText(p: LoadProgress): string {
+  if (p.fullDownload && p.total) {
+    return `ダウンロード中: ${fmtMB(p.bytes)} / ${fmtMB(p.total)}（${Math.min(100, Math.floor((p.bytes / p.total) * 100))}%）`;
+  }
+  return `取得済み ${fmtMB(p.bytes)}（${p.requests} 回の通信）`;
+}
+
+/** 進捗つきの読み込み画面。update に取得状況を渡すと表示が変わる */
+function progressScreen(title: string, onCancel: () => void): { update: (p: LoadProgress) => void; stop: () => void } {
+  const el = document.createElement('div');
+  el.className = 'loading progress';
+  el.innerHTML = `
+    <div class="pg-title"></div>
+    <div class="pg-bar"><i></i></div>
+    <div class="pg-detail">Drive に接続しています…</div>
+    <div class="pg-hint">大きなファイルは、最初のページが出るまで時間がかかることがあります</div>
+    <button class="s-btn" data-act="cancel">キャンセル</button>`;
+  (el.querySelector('.pg-title') as HTMLElement).textContent = title;
+  const bar = el.querySelector('.pg-bar') as HTMLElement;
+  const fill = bar.querySelector('i') as HTMLElement;
+  const detail = el.querySelector('.pg-detail') as HTMLElement;
+  const startedAt = Date.now();
+  let last = '';
+  const render = () => {
+    const sec = Math.floor((Date.now() - startedAt) / 1000);
+    detail.textContent = `${last || 'Drive に接続しています…'}・${sec} 秒`;
+  };
+  const tick = window.setInterval(render, 500);
+  el.querySelector('[data-act=cancel]')!.addEventListener('click', () => { window.clearInterval(tick); onCancel(); });
+  showScreen(el);
+  return {
+    update: (p) => {
+      last = progressText(p);
+      if (p.fullDownload && p.total) {
+        bar.classList.remove('indeterminate');
+        fill.style.width = `${Math.min(100, (p.bytes / p.total) * 100)}%`;
+      } else {
+        bar.classList.add('indeterminate'); // 全体の量が分からないので、動いていることだけ示す
+      }
+      render();
+    },
+    stop: () => window.clearInterval(tick),
+  };
+}
+
 async function openDriveBook(item: DriveItem): Promise<void> {
   if (!drive) return;
-  loadingScreen(`「${item.name}」を開いています…`);
+  const ac = new AbortController();
+  const screen = progressScreen(`「${item.name}」を開いています`, () => {
+    ac.abort();
+    openShelf();
+  });
+  const bar = screen.update;
+  bar({ bytes: 0, requests: 0, total: item.size, fullDownload: false });
+  // 開いたあと、最初のページを描画している間も取得状況を表示するための受け口
+  let sink: (p: LoadProgress) => void = bar;
   try {
-    const doc = await openDrive(drive, item.id, item.size);
-    startViewer(doc, item.id, item.name.replace(/\.pdf$/i, ''));
+    const doc = await openDrive(drive, item.id, item.size, { signal: ac.signal, onProgress: (p) => sink(p) });
+    screen.stop();
+    if (ac.signal.aborted) { void doc.destroy(); return; }
+    const v = startViewer(doc, item.id, item.name.replace(/\.pdf$/i, ''));
+    sink = (p) => v.setStatus(`最初のページを描画しています…（${progressText(p)}）`);
+    void v.ready.then(() => { sink = () => {}; });
   } catch (e) {
+    screen.stop();
+    if (ac.signal.aborted) return;
     alert(`開けませんでした: ${e instanceof Error ? e.message : e}`);
     openShelf();
   }
