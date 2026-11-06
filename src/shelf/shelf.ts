@@ -1,4 +1,5 @@
 import { bookmarklet, parseFileId } from '../config';
+import { runDiagnostics } from '../diag';
 import { DriveClient, isFolder, type DriveItem } from '../drive/api';
 import { openDrive, type PDFDoc } from '../viewer/source';
 import type { BookStates } from '../store/progress';
@@ -57,6 +58,12 @@ export class Shelf {
           <p>次のリンクをブックマークバーへドラッグして保存してください。Drive で PDF を開いた状態でそのブックマークを押すと、この書庫で開きます。</p>
           <p><a class="s-bm" draggable="true">書庫で開く</a></p>
         </details>
+        <details>
+          <summary>通信診断（読み込みが遅いとき）</summary>
+          <p>このフォルダの一番大きい PDF で、Drive との通信を測ります（数十秒かかります。通信量は 10MB ほどです）。</p>
+          <p><button class="s-btn" data-act="diag">診断を実行</button></p>
+          <pre class="s-diag"></pre>
+        </details>
       </footer>`;
     const q = this.el.querySelector('.s-search') as HTMLInputElement;
     q.addEventListener('input', () => { this.query = q.value.trim().toLowerCase(); this.renderGrid(); });
@@ -77,8 +84,21 @@ export class Shelf {
     });
     // 現在のアプリのURL（?以降なし）をブックマークレットに埋め込む
     this.el.querySelector('.s-bm')!.setAttribute('href', bookmarklet(location.origin + location.pathname));
+    this.el.querySelector('[data-act=diag]')!.addEventListener('click', () => void this.diagnose());
     this.el.querySelector('[data-act=settings]')!.addEventListener('click', () => this.init.onSettings());
     this.el.querySelector('[data-act=signout]')!.addEventListener('click', () => this.init.onSignOut());
+  }
+
+  private async diagnose(): Promise<void> {
+    const pre = this.el.querySelector('.s-diag') as HTMLElement;
+    const target = this.items.filter((i) => !isFolder(i) && i.size).sort((a, b) => (b.size ?? 0) - (a.size ?? 0))[0];
+    if (!target) { pre.textContent = 'このフォルダに PDF がありません'; return; }
+    pre.textContent = '測定中…';
+    try {
+      await runDiagnostics(this.init.drive, target, (t) => { pre.textContent = t; });
+    } catch (e) {
+      pre.textContent += `\n失敗しました: ${e instanceof Error ? e.message : e}`;
+    }
   }
 
   private message(text: string): void {

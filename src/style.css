@@ -51,6 +51,9 @@ button, input, select { font: inherit; color: inherit; }
 .s-url { display: flex; gap: 8px; padding: 4px 0 8px; }
 .s-url-in { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
 .s-foot { margin-top: 24px; font-size: 13px; color: var(--muted); }
+.s-foot details { margin-bottom: 10px; }
+.s-diag { white-space: pre-wrap; word-break: break-all; font-size: 11px; line-height: 1.5; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px; overflow-x: auto; }
+.s-diag:empty { display: none; }
 .s-bm { display: inline-block; padding: 6px 12px; border: 1px dashed var(--accent); border-radius: 8px; color: var(--accent); cursor: grab; text-decoration: none; }
 
 /* ---- ビューア（常に暗い背景） ---- */

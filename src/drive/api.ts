@@ -19,6 +19,11 @@ export const isFolder = (i: DriveItem) => i.mimeType === FOLDER_MIME;
 export class DriveClient {
   constructor(private clientId: string) {}
 
+  /** 診断用: 現在のアクセストークン */
+  accessToken(): Promise<string> {
+    return getToken(this.clientId, false);
+  }
+
   private async fetchJson<T>(url: string, init: RequestInit = {}): Promise<T> {
     const res = await this.fetchAuthed(url, init);
     return (await res.json()) as T;
