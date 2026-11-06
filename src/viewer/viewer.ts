@@ -17,8 +17,27 @@ export interface ViewerInit {
 const MAX_ZOOM = 5;
 const SWIPE_MIN = 50;
 const EDGE_OVERSHOOT = 80;
-const CACHE_SIZE = 6;
-const MAX_CANVAS_PIXELS = 16_000_000;
+const CACHE_SIZE = 5;
+const MAX_CANVAS_PIXELS = 12_000_000;
+/** 連続でページを送っている間は先読みや全ページの調査を控える */
+const IDLE_MS = 300;
+/** 現在位置の前後、何スプレッド分の縦横サイズを先に調べるか */
+const MEASURE_AHEAD = 6;
+
+/** 描画ジョブ。キャンセルすると、実行中のPDF.js描画も中断する */
+interface Job { cancelled: boolean; tasks: Set<{ cancel(): void }> }
+const newJob = (): Job => ({ cancelled: false, tasks: new Set() });
+function cancelJob(j: Job | null): void {
+  if (!j) return;
+  j.cancelled = true;
+  for (const t of j.tasks) t.cancel();
+  j.tasks.clear();
+}
+class CancelledError extends Error {}
+function releaseCanvas(c: HTMLCanvasElement): void {
+  c.width = 0; // GPU/メモリを早めに手放す
+  c.height = 0;
+}
 
 type Size = { w: number; h: number };
 
@@ -47,8 +66,15 @@ export class Viewer {
   private ty = 0;
   private renderZoom = 1;
   private baseSize: Size = { w: 0, h: 0 };
-  private renderToken = 0;
   private cache = new Map<string, HTMLCanvasElement[]>();
+  private displayedKey = '';
+  private displayJob: Job | null = null;
+  private prefetchJob: Job | null = null;
+  private showing = false;
+  private wantShow: { reset: boolean } | null = null;
+  private lastNav = 0;
+  private wideCount = 0;
+  private measuredCount = 0;
   private zoomTimer = 0;
   private disposed = false;
   private uiVisible = true;
@@ -81,10 +107,11 @@ export class Viewer {
       this.direction = this.state.direction;
     }
     // 先頭ページだけ先に調べてから表示し、残りは裏で調べる
-    await this.measure(0);
-    this.layout(Math.min(this.state.page, n - 1));
-    await this.show();
-    void this.measureAll();
+    // 現在のページだけ調べてすぐ表示する。周辺の調査は、表示したあと裏で行う
+    const startPage = Math.min(this.state.page, n - 1);
+    await this.measure(startPage);
+    this.layout(startPage);
+    this.requestShow(true);
   }
 
   private async measure(i: number): Promise<void> {
@@ -92,27 +119,42 @@ export class Viewer {
     const page = await this.doc.getPage(i + 1);
     const v = page.getViewport({ scale: 1 });
     this.sizes[i] = { w: v.width, h: v.height };
+    this.measuredCount++;
+    if (isWideSize(v.width, v.height)) this.wideCount++;
+    page.cleanup();
   }
 
-  /** 全ページの縦横を裏で調べる。横長ページが見つかったらレイアウトを組み直す */
-  private async measureAll(): Promise<void> {
+  /** 縦横が未調査のページは、調査済みのページの多数派と同じとみなす */
+  private isWide(i: number): boolean {
+    const s = this.sizes[i];
+    if (s) return isWideSize(s.w, s.h);
+    return this.measuredCount > 0 && this.wideCount * 2 > this.measuredCount;
+  }
+
+  /** 指定ページの前後だけ縦横を調べる（全ページを調べると Drive の通信を食うので、読んでいる周辺に限る） */
+  private async measureAround(page: number): Promise<void> {
     const n = this.doc.numPages;
-    let changed = false;
-    const wasWide = (i: number) => { const s = this.sizes[i]; return !!s && isWideSize(s.w, s.h); };
-    for (let i = 0; i < n && !this.disposed; i++) {
-      const before = wasWide(i);
-      const had = !!this.sizes[i];
-      try { await this.measure(i); } catch { return; }
-      if (!had && wasWide(i) !== before) changed = true;
-      if (changed && (i % 20 === 19 || i === n - 1)) {
-        changed = false;
-        const page = this.spreads[this.cur]?.[0] ?? 0;
-        this.layout(page);
-        void this.show(false);
-      }
-    }
-    // 全ページの縦横が分かった（レイアウトが確定した）
+    const span = MEASURE_AHEAD * (this.double ? 2 : 1);
+    const from = Math.max(0, page - 2);
+    const to = Math.min(n - 1, page + span);
+    const todo: number[] = [];
+    for (let i = from; i <= to; i++) if (!this.sizes[i]) todo.push(i);
+    // まとめて依頼すると、PDF.js が取得をまとめてくれる
+    await Promise.all(todo.map((i) => this.measure(i).catch(() => undefined)));
+  }
+
+  /** 周辺の調査で横長ページが見つかり、組み方が変わるなら、レイアウトを組み直す */
+  private async refreshMeasure(): Promise<void> {
+    const page = this.spreads[this.cur]?.[0] ?? 0;
+    const before = JSON.stringify(this.spreads.slice(Math.max(0, this.cur - 1), this.cur + MEASURE_AHEAD));
+    await this.measureAround(page);
+    if (this.disposed) return;
     this.el.dataset.measured = 'true';
+    const first = this.spreads[this.cur]?.[0] ?? 0;
+    if (first !== page) return; // 調べている間に別のページへ移った
+    this.layout(page);
+    const after = JSON.stringify(this.spreads.slice(Math.max(0, this.cur - 1), this.cur + MEASURE_AHEAD));
+    if (before !== after) this.requestShow(false);
   }
 
   // ---------- レイアウト ----------
@@ -123,29 +165,81 @@ export class Viewer {
       numPages: this.doc.numPages,
       double: this.double,
       coverSingle: this.state.coverSingle,
-      isWide: (i) => { const s = this.sizes[i]; return !!s && isWideSize(s.w, s.h); },
+      isWide: (i) => this.isWide(i),
     });
     this.cur = spreadIndexOfPage(this.spreads, page);
-    this.cache.clear();
+    this.clearCache();
     this.refreshUi();
+  }
+
+  private clearCache(): void {
+    for (const c of this.cache.values()) c.forEach(releaseCanvas);
+    this.cache.clear();
+    this.displayedKey = '';
   }
 
   private relayout(): void {
     const page = this.spreads[this.cur]?.[0] ?? this.state.page;
     this.layout(page);
-    void this.show();
+    this.requestShow(true);
   }
 
   // ---------- 描画 ----------
-  private async show(resetView = true): Promise<void> {
-    const token = ++this.renderToken;
+  /**
+   * 表示の更新を依頼する。描画中に何度依頼されても、描画が終わったあとに「最新のスプレッド」を1回だけ描く。
+   * 古い描画は中断するので、連続でページを送っても処理が積み上がらない。
+   */
+  private requestShow(resetView: boolean): void {
+    this.lastNav = performance.now();
+    cancelJob(this.prefetchJob);
+    // 描画中のスプレッドがもう古いなら、描画を中断して最新のものに切り替える
+    cancelJob(this.displayJob);
+    this.wantShow = { reset: resetView || (this.wantShow?.reset ?? false) };
+    if (!this.showing) void this.runShow();
+  }
+
+  private async runShow(): Promise<void> {
+    this.showing = true;
+    try {
+      while (this.wantShow && !this.disposed) {
+        const { reset } = this.wantShow;
+        this.wantShow = null;
+        await this.showOnce(reset);
+      }
+    } finally {
+      this.showing = false;
+    }
+    if (!this.disposed) this.afterIdle();
+  }
+
+  private async showOnce(resetView: boolean): Promise<void> {
+    const spread = this.cur;
     if (resetView) { this.zoom = 1; this.tx = 0; this.ty = 0; this.renderZoom = 1; }
-    const canvases = await this.getSpreadCanvases(this.cur, this.renderZoom);
-    if (token !== this.renderToken || this.disposed) return;
+    const job = newJob();
+    this.displayJob = job;
+    let canvases: HTMLCanvasElement[] | null = null;
+    try {
+      canvases = await this.getSpreadCanvases(spread, this.renderZoom, job);
+    } catch (e) {
+      console.error('ページの描画に失敗しました', e);
+    }
+    if (this.displayJob === job) this.displayJob = null;
+    if (!canvases || job.cancelled || spread !== this.cur || this.disposed) return;
+    this.displayedKey = this.cacheKey(spread, this.renderZoom);
     this.content.replaceChildren(...canvases);
     this.applyTransform();
     this.refreshUi();
-    void this.prefetch(token);
+    // 実際に画面に出ているページ（テストや診断用）
+    this.el.dataset.shown = String(this.spreads[spread]?.[0] ?? 0);
+  }
+
+  /** 操作が落ち着いたら、周辺の調査と先読みを始める */
+  private afterIdle(): void {
+    const wait = Math.max(0, IDLE_MS - (performance.now() - this.lastNav));
+    window.setTimeout(() => {
+      if (this.disposed || this.showing || performance.now() - this.lastNav < IDLE_MS - 20) return;
+      void this.refreshMeasure().then(() => this.prefetch());
+    }, wait);
   }
 
   private cacheKey(spread: number, rz: number): string {
@@ -153,48 +247,80 @@ export class Viewer {
     return `${spread}:${rz}:${Math.round(r.width)}x${Math.round(r.height)}:${this.double}:${this.direction}`;
   }
 
-  private async getSpreadCanvases(spread: number, rz: number): Promise<HTMLCanvasElement[]> {
+  /** 指定スプレッドのキャンバスを返す。キャンセルされたら null */
+  private async getSpreadCanvases(spread: number, rz: number, job: Job): Promise<HTMLCanvasElement[] | null> {
     const key = this.cacheKey(spread, rz);
     const hit = this.cache.get(key);
     if (hit) { this.cache.delete(key); this.cache.set(key, hit); return hit; }
 
     const pages = visualOrder(this.spreads[spread] ?? [], this.direction);
     await Promise.all(pages.map((p) => this.measure(p)));
+    if (job.cancelled) return null;
     const sizes = pages.map((p) => this.sizes[p]!);
     const totalW = sizes.reduce((a, s) => a + s.w, 0);
     const maxH = Math.max(...sizes.map((s) => s.h));
     const r = this.stage.getBoundingClientRect();
     const fit = Math.min(r.width / totalW, r.height / maxH);
-    this.baseSize = { w: totalW * fit, h: maxH * fit };
+    if (spread === this.cur) this.baseSize = { w: totalW * fit, h: maxH * fit };
 
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    const canvases = await Promise.all(pages.map(async (p, i) => {
-      const page = await this.doc.getPage(p + 1);
-      const s = sizes[i];
-      let scale = fit * dpr * rz;
-      const px = s.w * scale * s.h * scale;
-      if (px > MAX_CANVAS_PIXELS) scale *= Math.sqrt(MAX_CANVAS_PIXELS / px);
-      const vp = page.getViewport({ scale });
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.floor(vp.width);
-      canvas.height = Math.floor(vp.height);
-      canvas.style.width = `${s.w * fit}px`;
-      canvas.style.height = `${s.h * fit}px`;
-      await page.render({ canvasContext: canvas.getContext('2d')!, viewport: vp, background: '#fff' }).promise;
-      return canvas;
-    }));
-    this.cache.set(key, canvases);
-    while (this.cache.size > CACHE_SIZE) this.cache.delete(this.cache.keys().next().value!);
-    return canvases;
+    try {
+      const canvases = await Promise.all(pages.map(async (p, i) => {
+        const page = await this.doc.getPage(p + 1);
+        if (job.cancelled) throw new CancelledError();
+        const s = sizes[i];
+        let scale = fit * dpr * rz;
+        const px = s.w * scale * s.h * scale;
+        if (px > MAX_CANVAS_PIXELS) scale *= Math.sqrt(MAX_CANVAS_PIXELS / px);
+        const vp = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.floor(vp.width);
+        canvas.height = Math.floor(vp.height);
+        canvas.style.width = `${s.w * fit}px`;
+        canvas.style.height = `${s.h * fit}px`;
+        const task = page.render({ canvasContext: canvas.getContext('2d')!, viewport: vp, background: '#fff' });
+        job.tasks.add(task);
+        try {
+          await task.promise;
+        } catch (e) {
+          if ((e as { name?: string })?.name === 'RenderingCancelledException') throw new CancelledError();
+          throw e;
+        } finally {
+          job.tasks.delete(task);
+          page.cleanup(); // 画像のデコード結果などを解放して、メモリの膨張を防ぐ
+        }
+        return canvas;
+      }));
+      if (job.cancelled) { canvases.forEach(releaseCanvas); return null; }
+      this.cache.set(key, canvases);
+      this.evict();
+      return canvases;
+    } catch (e) {
+      if (e instanceof CancelledError) return null;
+      throw e;
+    }
   }
 
-  /** 前後のスプレッドを先に描画しておく */
-  private async prefetch(token: number): Promise<void> {
+  /** キャッシュが増えすぎたら古いものから捨てる（表示中のものは残す）。キャンバスのメモリも明示的に解放する */
+  private evict(): void {
+    for (const key of this.cache.keys()) {
+      if (this.cache.size <= CACHE_SIZE) break;
+      if (key === this.displayedKey) continue;
+      this.cache.get(key)!.forEach(releaseCanvas);
+      this.cache.delete(key);
+    }
+  }
+
+  /** 前後のスプレッドを先に描画しておく（操作が始まったら中断する） */
+  private async prefetch(): Promise<void> {
+    cancelJob(this.prefetchJob);
+    const job = newJob();
+    this.prefetchJob = job;
     for (const d of [1, -1, 2]) {
-      if (token !== this.renderToken || this.disposed) return;
+      if (job.cancelled || this.disposed) return;
       const idx = this.cur + d;
       if (idx < 0 || idx >= this.spreads.length) continue;
-      try { await this.getSpreadCanvases(idx, 1); } catch { /* 先読み失敗は無視 */ }
+      try { await this.getSpreadCanvases(idx, 1, job); } catch { /* 先読みの失敗は無視 */ }
     }
   }
 
@@ -222,11 +348,16 @@ export class Viewer {
       if (this.disposed || this.zoom <= 1.05) return;
       const rz = Math.min(this.zoom, 4);
       if (Math.abs(rz - this.renderZoom) < 0.25) return;
-      const token = this.renderToken;
-      const canvases = await this.getSpreadCanvases(this.cur, rz);
-      if (token !== this.renderToken || this.disposed) return;
+      const spread = this.cur;
+      const job = newJob();
+      cancelJob(this.prefetchJob);
+      this.prefetchJob = job; // 拡大の描き直しも、操作が始まれば中断する
+      let canvases: HTMLCanvasElement[] | null = null;
+      try { canvases = await this.getSpreadCanvases(spread, rz, job); } catch { return; }
+      if (!canvases || job.cancelled || spread !== this.cur || this.disposed || this.showing) return;
       // 描き直した分、CSSの倍率は掛け直さない（CSSサイズは常に等倍）
       this.renderZoom = rz;
+      this.displayedKey = this.cacheKey(spread, rz);
       this.content.replaceChildren(...canvases);
       this.applyTransform();
     }, 250);
@@ -245,7 +376,8 @@ export class Viewer {
   private jumpSpread(idx: number): void {
     this.cur = Math.max(0, Math.min(this.spreads.length - 1, idx));
     this.persist();
-    void this.show();
+    this.refreshUi();
+    this.requestShow(true);
   }
 
   private jumpPage(page: number): void {
@@ -292,10 +424,10 @@ export class Viewer {
     this.el.querySelector('[data-act=close]')!.addEventListener('click', () => this.onClose());
     this.el.querySelector('[data-act=dir]')!.addEventListener('click', () => {
       this.direction = this.direction === 'rtl' ? 'ltr' : 'rtl';
-      this.cache.clear();
+      this.clearCache();
       this.persist();
-      void this.show();
       this.refreshUi();
+      this.requestShow(true);
     });
     this.el.querySelector('[data-act=mode]')!.addEventListener('click', () => {
       const order: SpreadMode[] = ['auto', 'double', 'single'];
@@ -502,6 +634,8 @@ export class Viewer {
 
   dispose(): void {
     this.disposed = true;
+    cancelJob(this.displayJob);
+    cancelJob(this.prefetchJob);
     window.clearTimeout(this.zoomTimer);
     window.removeEventListener('keydown', this.keyHandler);
     window.removeEventListener('resize', this.resizeHandler);

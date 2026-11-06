@@ -20,6 +20,12 @@ export async function openLocal(file: File): Promise<PDFDoc> {
 }
 
 const INITIAL_CHUNK = 1024 * 1024;
+/**
+ * 1回の取得の最小単位（PDF.js の既定と同じ）。大きくすると往復は減るが、ページ情報が散らばった PDF では
+ * 開いた直後にほぼ全体を取得してしまう（試験用の 99MB / 120 ページで、1MB 単位だと 100MB、64KB だと 9MB）。
+ * 画像など連続した大きなデータは、単位に関係なく 1 回の範囲指定にまとめて取得される。
+ */
+const RANGE_CHUNK = 65536;
 
 /**
  * Drive上のPDFを Range 取得で開く。必要な部分だけを取りにいくので、数百MBでも先頭から表示できる。
@@ -42,7 +48,7 @@ export async function openDrive(drive: DriveClient, fileId: string, size: number
     }
   }
   const transport = new DriveTransport(size, initial);
-  return pdfjs.getDocument({ range: transport, ...DOC_OPTS, disableAutoFetch: true, disableStream: true }).promise;
+  return pdfjs.getDocument({ range: transport, ...DOC_OPTS, disableAutoFetch: true, disableStream: true, rangeChunkSize: RANGE_CHUNK }).promise;
 }
 
 /** PDFのメタデータ（ViewerPreferences の Direction）から綴じ方向を推定する */
