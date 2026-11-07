@@ -143,6 +143,8 @@ export class Viewer {
     await this.measure(startPage);
     this.layout(startPage);
     this.requestShow(true);
+    // 前回の続きから開いたことを知らせる
+    if (startPage > 0) void this.ready.then(() => this.flash(`${(this.spreads[this.cur]?.[0] ?? startPage) + 1} ページから再開しました`));
   }
 
   private async measure(i: number): Promise<void> {

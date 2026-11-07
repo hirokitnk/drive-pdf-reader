@@ -5,7 +5,7 @@ import { getConfirmMB, setConfirmMB } from '../prefs';
 import { CACHE_LIMIT_CHOICES, getBlockStore, getCacheLimitMB, setCacheLimitMB } from '../cache/instance';
 import { DriveClient, isFolder, type DriveItem } from '../drive/api';
 import { openDrive, type PDFDoc } from '../viewer/source';
-import type { BookStates } from '../store/progress';
+import { agoText, recentBooks, type BookStates } from '../store/progress';
 
 export interface ShelfInit {
   drive: DriveClient;
@@ -14,6 +14,8 @@ export interface ShelfInit {
   onOpen: (item: DriveItem) => void;
   onOpenLocal: (file: File) => void;
   onOpenFileId: (fileId: string) => void;
+  /** 履歴の一覧から外す */
+  onForget: (fileId: string) => void;
   onSettings: () => void;
   onSignOut: () => void;
 }
@@ -57,6 +59,7 @@ export class Shelf {
         <input class="s-url-in" placeholder="Drive のリンクを貼って開く（https://drive.google.com/file/d/…）" />
         <button class="s-btn">開く</button>
       </form>
+      <section class="s-recent" hidden></section>
       <nav class="s-crumbs"></nav>
       <main class="s-grid"></main>
       <div class="s-msg" hidden></div>
@@ -85,7 +88,7 @@ export class Shelf {
         </details>
       </footer>`;
     const q = this.el.querySelector('.s-search') as HTMLInputElement;
-    q.addEventListener('input', () => { this.query = q.value.trim().toLowerCase(); this.renderGrid(); });
+    q.addEventListener('input', () => { this.query = q.value.trim().toLowerCase(); this.renderGrid(); this.renderRecent(); });
     const sort = this.el.querySelector('.s-sort') as HTMLSelectElement;
     sort.addEventListener('change', () => { this.sort = sort.value as Sort; this.renderGrid(); });
     (this.el.querySelector('.s-file') as HTMLInputElement).addEventListener('change', (e) => {
@@ -150,6 +153,7 @@ export class Shelf {
     usage.textContent = `使用中: ${(total / 1e6).toFixed(0)} MB（${metas.length} 冊）`;
     this.saved = new Map(metas.map((m) => [m.fileId, m.bytes]));
     this.renderGrid();
+    this.renderRecent();
   }
 
   private async diagnose(): Promise<void> {
@@ -181,6 +185,7 @@ export class Shelf {
       this.message(e instanceof Error ? e.message : String(e));
     }
     this.renderGrid();
+    this.renderRecent();
   }
 
   private renderCrumbs(): void {
@@ -197,6 +202,40 @@ export class Shelf {
     });
   }
 
+  /** 「最近開いた本」。フォルダに関係なく、続きから読める。検索中・サブフォルダの中では隠す */
+  renderRecent(): void {
+    const box = this.el.querySelector('.s-recent') as HTMLElement;
+    const list = this.stack.length === 1 && !this.query ? recentBooks(this.init.states()) : [];
+    box.hidden = list.length === 0;
+    box.replaceChildren();
+    if (list.length === 0) return;
+    const h = document.createElement('h2');
+    h.textContent = '最近開いた本';
+    box.append(h);
+    list.forEach(({ id, state }, i) => {
+      const row = document.createElement('div');
+      row.className = 's-recent-row';
+      const open = document.createElement('button');
+      open.className = 's-recent-open';
+      const pct = state.numPages ? Math.min(100, ((state.page + 1) / state.numPages) * 100) : 0;
+      const where = state.numPages ? `${state.page + 1} / ${state.numPages} ページ` : `${state.page + 1} ページ`;
+      open.innerHTML = '<span class="s-recent-title"></span><span class="s-recent-meta"></span><span class="s-prog"><i></i></span>';
+      (open.querySelector('.s-recent-title') as HTMLElement).textContent = (i === 0 ? '続きから: ' : '') + (state.title ?? '');
+      (open.querySelector('.s-recent-meta') as HTMLElement).textContent = `${where}・${agoText(state.lastOpenedAt ?? 0)}`;
+      (open.querySelector('.s-prog i') as HTMLElement).style.width = `${pct}%`;
+      (open.querySelector('.s-prog') as HTMLElement).hidden = !state.numPages;
+      open.addEventListener('click', () => this.init.onOpenFileId(id));
+      const del = document.createElement('button');
+      del.className = 's-recent-del';
+      del.textContent = '×';
+      del.title = '履歴から外す（読んだ位置の記録は残ります）';
+      del.setAttribute('aria-label', `「${state.title}」を履歴から外す`);
+      del.addEventListener('click', () => { this.init.onForget(id); this.renderRecent(); });
+      row.append(open, del);
+      box.append(row);
+    });
+  }
+
   private renderGrid(): void {
     const grid = this.el.querySelector('.s-grid') as HTMLElement;
     grid.replaceChildren();
@@ -205,7 +244,8 @@ export class Shelf {
     const folders = this.items.filter((i) => isFolder(i) && match(i));
     const books = this.items.filter((i) => !isFolder(i) && match(i));
     if (this.sort === 'recent') {
-      books.sort((a, b) => (states[b.id]?.updatedAt ?? 0) - (states[a.id]?.updatedAt ?? 0));
+      const t = (id: string) => states[id]?.lastOpenedAt ?? states[id]?.updatedAt ?? 0;
+      books.sort((a, b) => t(b.id) - t(a.id));
     }
     for (const f of folders) {
       const card = document.createElement('button');

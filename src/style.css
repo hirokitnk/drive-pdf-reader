@@ -46,6 +46,15 @@ button, input, select { font: inherit; color: inherit; }
 .s-name { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }
 .s-prog { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .s-prog i { display: block; height: 100%; background: var(--accent); }
+/* ---- 最近開いた本 ---- */
+.s-recent { margin: 4px 0 14px; display: grid; gap: 6px; }
+.s-recent h2 { margin: 0 0 2px; font-size: 14px; color: var(--muted); font-weight: 600; }
+.s-recent-row { display: flex; gap: 6px; align-items: stretch; }
+.s-recent-open { flex: 1; min-width: 0; display: grid; gap: 3px; text-align: left; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); cursor: pointer; }
+.s-recent-row:first-of-type .s-recent-open { border-color: var(--accent); }
+.s-recent-title { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-recent-meta { font-size: 12px; color: var(--muted); }
+.s-recent-del { width: 34px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--muted); cursor: pointer; font-size: 16px; }
 .s-saved { font-size: 11px; color: var(--accent); }
 .s-msg { padding: 24px; text-align: center; color: var(--muted); }
 

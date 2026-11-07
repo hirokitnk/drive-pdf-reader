@@ -94,6 +94,11 @@ function openShelf(): void {
     onOpen: (item) => void openDriveBook(item),
     onOpenLocal: (f) => void openLocalFile(f),
     onOpenFileId: (id) => void openDriveBookById(id),
+    onForget: (id) => {
+      // 履歴の一覧からだけ外す（読んでいたページの記録は残す）
+      const cur = store.get(id);
+      if (cur) store.set(id, { ...cur, lastOpenedAt: 0, updatedAt: Date.now() });
+    },
     onSettings: () => loginScreen(),
     onSignOut: () => { signOut(); drive = null; shelf = null; loginScreen(); },
   });
@@ -101,12 +106,19 @@ function openShelf(): void {
 }
 
 // ---------- 本を開く ----------
-function startViewer(doc: PDFDoc, key: string, title: string): Viewer {
+function startViewer(doc: PDFDoc, key: string, title: string, meta?: { size?: number; mtime?: string }): Viewer {
   viewer?.dispose();
+  let state = store.get(key) ?? defaultBookState();
+  if (meta) {
+    // Drive の本は、開いた時点で「最近開いた本」に記録する（ページを送らなくても残る）
+    const now = Date.now();
+    state = { ...state, title, size: meta.size, mtime: meta.mtime, numPages: doc.numPages, lastOpenedAt: now, updatedAt: now };
+    store.set(key, state);
+  }
   const v = new Viewer({
     doc,
     title,
-    state: store.get(key) ?? defaultBookState(),
+    state,
     onState: (s) => store.set(key, s),
     onClose: () => {
       viewer?.dispose();
@@ -209,7 +221,7 @@ async function openDriveBook(item: DriveItem): Promise<void> {
     });
     screen.stop();
     if (ac.signal.aborted) { void doc.destroy(); return; }
-    const v = startViewer(doc, item.id, item.name.replace(/\.pdf$/i, ''));
+    const v = startViewer(doc, item.id, item.name.replace(/\.pdf$/i, ''), { size: item.size, mtime: item.modifiedTime });
     sink = (p) => { fetched = p.bytes; v.setStatus(`最初のページを描画しています…（${progressText(p)}）`); };
     void v.ready.then(() => {
       sink = () => {};
@@ -262,3 +274,7 @@ if ('serviceWorker' in navigator && import.meta.env.PROD) {
 
 if (config.clientId && hasSignedInBefore()) void signIn(false);
 else loginScreen();
+
+// 画面を離れる・隠れるときに、読書位置の同期を急ぐ（端末内への保存は、ページを送るたびに済んでいる）
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') void store.flush(); });
+window.addEventListener('pagehide', () => void store.flush());
