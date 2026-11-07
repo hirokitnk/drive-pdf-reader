@@ -16,6 +16,41 @@ export interface DriveItem {
 export const FOLDER_MIME = 'application/vnd.google-apps.folder';
 export const isFolder = (i: DriveItem) => i.mimeType === FOLDER_MIME;
 
+const SHORTCUT_MIME = 'application/vnd.google-apps.shortcut';
+
+/**
+ * PDF として扱うファイル。
+ * - application/pdf
+ * - PDF へのショートカット（実体は shortcutDetails.targetId）
+ * - 種類が不明（octet-stream）になっているが、名前が .pdf のもの（他のツールでアップロードされたもの）
+ */
+const PDF_QUERY =
+  `mimeType='application/pdf' or mimeType='${SHORTCUT_MIME}' or (mimeType='application/octet-stream' and name contains '.pdf')`;
+const PDF_OR_FOLDER_QUERY = `${PDF_QUERY} or mimeType='${FOLDER_MIME}'`;
+
+interface RawItem {
+  id: string; name: string; mimeType: string; size?: string; thumbnailLink?: string; modifiedTime?: string;
+  shortcutDetails?: { targetId?: string; targetMimeType?: string };
+}
+
+/** API の応答を DriveItem にする。PDF でも フォルダでもないものは null */
+export function toItem(f: RawItem): DriveItem | null {
+  const base = { name: f.name, thumbnailLink: f.thumbnailLink, modifiedTime: f.modifiedTime };
+  const size = f.size ? Number(f.size) : undefined;
+  if (f.mimeType === SHORTCUT_MIME) {
+    const t = f.shortcutDetails;
+    // ショートカットは、指す先を開く（PDF とフォルダ以外へのショートカットは無視）
+    if (t?.targetId && t.targetMimeType === 'application/pdf') return { ...base, id: t.targetId, mimeType: 'application/pdf' };
+    if (t?.targetId && t.targetMimeType === FOLDER_MIME) return { ...base, id: t.targetId, mimeType: FOLDER_MIME };
+    return null;
+  }
+  if (f.mimeType === 'application/octet-stream') {
+    return /\.pdf$/i.test(f.name) ? { ...base, id: f.id, mimeType: 'application/pdf', size } : null;
+  }
+  if (f.mimeType === 'application/pdf' || f.mimeType === FOLDER_MIME) return { ...base, id: f.id, mimeType: f.mimeType, size };
+  return null;
+}
+
 export class DriveClient {
   constructor(private clientId: string) {}
 
@@ -52,23 +87,42 @@ export class DriveClient {
   /** フォルダ直下のサブフォルダとPDFを一覧する（フォルダ→名前順） */
   async list(folderId: string): Promise<DriveItem[]> {
     const parent = folderId || 'root';
-    const q = `'${parent}' in parents and trashed=false and (mimeType='application/pdf' or mimeType='${FOLDER_MIME}')`;
+    const q = `'${parent}' in parents and trashed=false and (${PDF_OR_FOLDER_QUERY})`;
+    return this.listPaged(q, { corpora: undefined });
+  }
+
+  /**
+   * Drive 全体（サブフォルダ、共有アイテム、共有ドライブを含む）の PDF を集めて返す。検索用。
+   * onProgress には、これまでに集めた件数を渡す。
+   */
+  async listAllPdfs(onProgress?: (count: number) => void): Promise<DriveItem[]> {
+    const q = `trashed=false and (${PDF_QUERY})`;
+    return this.listPaged(q, { corpora: 'allDrives', onProgress, onlyPdf: true });
+  }
+
+  private async listPaged(
+    q: string,
+    o: { corpora?: string; onProgress?: (count: number) => void; onlyPdf?: boolean },
+  ): Promise<DriveItem[]> {
     const items: DriveItem[] = [];
     let pageToken = '';
     do {
       const params = new URLSearchParams({
         q,
-        fields: 'nextPageToken,files(id,name,mimeType,size,thumbnailLink,modifiedTime)',
-        pageSize: '200',
+        fields: 'nextPageToken,files(id,name,mimeType,size,thumbnailLink,modifiedTime,shortcutDetails(targetId,targetMimeType))',
+        pageSize: '1000',
         orderBy: 'folder,name_natural',
         supportsAllDrives: 'true',
         includeItemsFromAllDrives: 'true',
       });
+      if (o.corpora) params.set('corpora', o.corpora);
       if (pageToken) params.set('pageToken', pageToken);
-      const r = await this.fetchJson<{ files: (Omit<DriveItem, 'size'> & { size?: string })[]; nextPageToken?: string }>(
-        `${API}/files?${params}`,
-      );
-      for (const f of r.files) items.push({ ...f, size: f.size ? Number(f.size) : undefined });
+      const r = await this.fetchJson<{ files: RawItem[]; nextPageToken?: string }>(`${API}/files?${params}`);
+      for (const f of r.files) {
+        const item = toItem(f);
+        if (item && (!o.onlyPdf || !isFolder(item))) items.push(item);
+      }
+      o.onProgress?.(items.length);
       pageToken = r.nextPageToken ?? '';
     } while (pageToken);
     return items;

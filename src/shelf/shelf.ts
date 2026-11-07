@@ -1,5 +1,6 @@
 import { bookmarklet, parseFileId } from '../config';
 import { runDiagnostics } from '../diag';
+import { matchesQuery } from '../search';
 import { CONFIRM_CHOICES } from '../confirm';
 import { getConfirmMB, setConfirmMB } from '../prefs';
 import { CACHE_LIMIT_CHOICES, getBlockStore, getCacheLimitMB, setCacheLimitMB } from '../cache/instance';
@@ -32,6 +33,11 @@ export class Shelf {
   private query = '';
   private sort: Sort = 'recent';
   private coverQueue: Promise<void> = Promise.resolve();
+  /** Drive 全体の PDF の一覧（検索用）。最初に検索したときに集める */
+  private index: DriveItem[] | null = null;
+  private indexState: 'idle' | 'loading' | 'error' = 'idle';
+  private indexCount = 0;
+  private searchTimer = 0;
   /** 保存データがある本（ファイルID → 保存済みバイト数） */
   private saved = new Map<string, number>();
 
@@ -88,7 +94,15 @@ export class Shelf {
         </details>
       </footer>`;
     const q = this.el.querySelector('.s-search') as HTMLInputElement;
-    q.addEventListener('input', () => { this.query = q.value.trim().toLowerCase(); this.renderGrid(); this.renderRecent(); });
+    q.addEventListener('input', () => {
+      window.clearTimeout(this.searchTimer);
+      this.searchTimer = window.setTimeout(() => {
+        this.query = q.value.trim();
+        if (this.query) void this.ensureIndex();
+        this.renderGrid();
+        this.renderRecent();
+      }, 150);
+    });
     const sort = this.el.querySelector('.s-sort') as HTMLSelectElement;
     sort.addEventListener('change', () => { this.sort = sort.value as Sort; this.renderGrid(); });
     (this.el.querySelector('.s-file') as HTMLInputElement).addEventListener('change', (e) => {
@@ -188,6 +202,24 @@ export class Shelf {
     this.renderRecent();
   }
 
+  /** Drive 全体の PDF の一覧を、初回の検索のときに 1 度だけ集める */
+  private async ensureIndex(): Promise<void> {
+    if (this.index || this.indexState === 'loading') return;
+    this.indexState = 'loading';
+    this.indexCount = 0;
+    try {
+      this.index = await this.init.drive.listAllPdfs((n) => {
+        this.indexCount = n;
+        if (this.query) this.renderGrid();
+      });
+      this.indexState = 'idle';
+    } catch (e) {
+      console.warn('Drive 全体の一覧を取得できませんでした', e);
+      this.indexState = 'error';
+    }
+    if (this.query) this.renderGrid();
+  }
+
   private renderCrumbs(): void {
     const nav = this.el.querySelector('.s-crumbs') as HTMLElement;
     nav.replaceChildren();
@@ -240,12 +272,25 @@ export class Shelf {
     const grid = this.el.querySelector('.s-grid') as HTMLElement;
     grid.replaceChildren();
     const states = this.init.states();
-    const match = (i: DriveItem) => !this.query || i.name.toLowerCase().includes(this.query);
+    const match = (i: DriveItem) => matchesQuery(i.name, this.query);
     const folders = this.items.filter((i) => isFolder(i) && match(i));
-    const books = this.items.filter((i) => !isFolder(i) && match(i));
+    // 検索中は、Drive 全体（サブフォルダ・共有アイテムを含む）と、いまのフォルダの中身を合わせて探す
+    const pool = this.query ? [...this.items.filter((i) => !isFolder(i)), ...(this.index ?? [])] : this.items.filter((i) => !isFolder(i));
+    const seen = new Set<string>();
+    const books = pool.filter((i) => match(i) && !seen.has(i.id) && !!seen.add(i.id));
     if (this.sort === 'recent') {
       const t = (id: string) => states[id]?.lastOpenedAt ?? states[id]?.updatedAt ?? 0;
       books.sort((a, b) => t(b.id) - t(a.id));
+    }
+    if (this.query) {
+      const where = this.indexState === 'loading' ? `（Drive 全体を検索中… ${this.indexCount} 件を確認）`
+        : this.indexState === 'error' ? '（Drive 全体の検索に失敗したため、このフォルダの中だけを検索しました）'
+        : '（Drive 全体）';
+      this.message(books.length + folders.length === 0 && this.indexState !== 'loading'
+        ? `「${this.query}」に一致する PDF はありません${where}。漢字・ひらがな・カタカナの違いにご注意ください`
+        : `${books.length} 冊が見つかりました${where}`);
+    } else if (this.items.length > 0) {
+      this.message('');
     }
     for (const f of folders) {
       const card = document.createElement('button');
@@ -293,7 +338,8 @@ export class Shelf {
   /** サムネイルが無い本は、1ページ目を自前で描画して表紙にする（1冊ずつ順番に） */
   private queueCover(item: DriveItem, thumb: HTMLElement): void {
     // 大きなファイルは、表紙のためだけに数十 MB を勝手に取得しない（開くときに確認する）
-    if ((item.size ?? 0) >= AUTO_COVER_MAX_BYTES) { thumb.textContent = 'PDF'; return; }
+    // サイズが分からないもの（ショートカットなど）も取得しない（全体をダウンロードしてしまうため）
+    if (!item.size || item.size >= AUTO_COVER_MAX_BYTES) { thumb.textContent = 'PDF'; return; }
     const run = async () => {
       if (!thumb.isConnected) return;
       let doc: PDFDoc | undefined;

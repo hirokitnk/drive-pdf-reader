@@ -190,6 +190,10 @@ function progressScreen(title: string, onCancel: () => void): { update: (p: Load
 
 async function openDriveBook(item: DriveItem): Promise<void> {
   if (!drive) return;
+  if (!item.size) {
+    // ショートカットなどは、サイズが分からない。実体の情報を取り直す（サイズが分からないと全体をダウンロードしてしまう）
+    try { item = { ...item, ...(await drive.getMeta(item.id)) }; } catch { /* 取れなければそのまま試す */ }
+  }
   // 保存領域: 一度開いたデータが残っていれば、通信せずに読める（上限 0 のときは使わない）
   const limitMB = getCacheLimitMB();
   const store = limitMB > 0 ? await getBlockStore() : null;
